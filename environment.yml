@@ -1,0 +1,18 @@
+name: gnn-tox21
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.10
+  - numpy
+  - pytorch
+  - torchvision
+  - torchaudio
+  - rdkit
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - pip
+  - pip:
+    - torch-geometric
