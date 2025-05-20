@@ -1,0 +1,11 @@
+# Core libraries
+torch>=2.0
+torch-geometric
+rdkit-pypi
+scikit-learn
+matplotlib
+seaborn
+
+# Additional (as needed)
+tensorboard
+jupyter

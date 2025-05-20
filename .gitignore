@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+# Jupyter
+.ipynb_checkpoints/
+gcn_tox21.py
+
+#vscode
+.vscode/
+
+# Environments
+.env/
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+pythonenv*
+
+# Data
+data/
