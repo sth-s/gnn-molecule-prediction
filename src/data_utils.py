@@ -10,6 +10,26 @@ from tqdm import tqdm
 import requests
 import shutil
 
+# Setup for safe weights-only loading in PyTorch 2.6+
+try:
+    from torch import serialization
+    # Import PyG classes for serialization
+    from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
+    from torch_geometric.data.storage import GlobalStorage
+    
+    try:
+        from torch_geometric.data.storage import NodeStorage, EdgeStorage, GraphStorage
+        pyg_storage_classes = [GlobalStorage, NodeStorage, EdgeStorage, GraphStorage]
+    except ImportError:
+        pyg_storage_classes = [GlobalStorage]
+    
+    # Register classes for safe loading
+    safe_classes = [DataEdgeAttr, DataTensorAttr] + pyg_storage_classes
+    serialization.add_safe_globals(safe_classes)
+    print(f"Registered PyG classes for safe weights_only loading")
+except (ImportError, AttributeError) as e:
+    print(f"Note: Using default PyTorch loading behavior")
+
 
 def download_tox21(root: str, filename: str) -> str:
     """
@@ -66,8 +86,9 @@ class Tox21Dataset(InMemoryDataset):
                  root: str,
                  filename: str = "tox21.csv",
                  smiles_col: str = "smiles",
+                 mol_id_col: str = "mol_id",
                  target_cols: list[str] | None = None,
-                 cache_file: str = "processed_tox21.pt",
+                 cache_file: str = "processed_tox21.pt",                
                  auto_download: bool = True,
                  recreate: bool = False,
                  transform=None,
@@ -79,7 +100,8 @@ class Tox21Dataset(InMemoryDataset):
         ── root (str): Root directory where the dataset should be saved
         ── filename (str): Name of the raw file to download
         ── smiles_col (str): Column name in CSV that contains SMILES strings
-        ── target_cols (list[str]|None): Target columns to predict. If None, all columns except smiles_col.
+        ── mol_id_col (str): Column name in CSV that contains molecule IDs
+        ── target_cols (list[str]|None): Target columns to predict. If None, all columns except smiles_col and mol_id_col.
         ── cache_file (str): Name of the cache file for processed data
         ── download (bool): If True, automatically download the dataset if it doesn't exist
         ── recreate (bool): If True, dataset will be reprocessed even if processed files exist
@@ -88,15 +110,27 @@ class Tox21Dataset(InMemoryDataset):
         """
         self.filename   = filename
         self.smiles_col = smiles_col
+        self.mol_id_col = mol_id_col
         self._target_cols = target_cols
         self.cache_file = cache_file
-        self.auto_download = auto_download  # Renamed to avoid conflict with download() method
+        self.auto_download = auto_download
         self.recreate   = recreate
-        # if recreate=True, remove previously generated cache
-        if self.recreate and os.path.exists(self.processed_paths[0]):
-            os.remove(self.processed_paths[0])
+        
+        _processed_dir = os.path.join(root, 'processed')
+        _processed_file_path = os.path.join(_processed_dir, self.cache_file)
+
+        if self.recreate and os.path.exists(_processed_file_path):
+            print(f"Recreating dataset: removing existing cache file")
+            os.makedirs(_processed_dir, exist_ok=True) 
+            os.remove(_processed_file_path)
+        
+        # Call the parent constructor which handles dataset setup
         super().__init__(root, transform, pre_transform)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        
+        # Explicitly load the processed data if file exists
+        # This ensures compatibility with PyTorch 2.6+ where weights_only=True by default
+        if os.path.exists(self.processed_paths[0]):
+            self.load(self.processed_paths[0])
 
     @property
     def raw_file_names(self):
@@ -130,7 +164,10 @@ class Tox21Dataset(InMemoryDataset):
         
         # Determine target columns
         if self._target_cols is None:
-            self._actual_target_cols = [c for c in df.columns if c != self.smiles_col]
+            # Exclude smiles_col AND mol_id_col if target_cols are not specified
+            self._actual_target_cols = [
+                c for c in df.columns if c not in [self.smiles_col, self.mol_id_col]
+            ]
         else:
             self._actual_target_cols = self._target_cols
         
@@ -138,10 +175,11 @@ class Tox21Dataset(InMemoryDataset):
         data_list = []
         for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing molecules"):
             smiles = row[self.smiles_col]
+            mol_id = str(row[self.mol_id_col])  # Ensure mol_id is string
             mol = Chem.MolFromSmiles(smiles)
             
             if mol is None:
-                print(f"Failed SMILES: {smiles} (idx={idx})")
+                print(f"Failed SMILES: {smiles} (idx={idx}, mol_id={mol_id})")
                 continue
             
             # Node features
@@ -175,20 +213,32 @@ class Tox21Dataset(InMemoryDataset):
                 edge_attr = torch.zeros((0, 1), dtype=torch.float)
             
             # Labels
-            labels = [float(row[c]) for c in self._actual_target_cols]
-            y = torch.tensor(labels, dtype=torch.float)
+            labels = [float(row[c]) if pd.notna(row[c]) else float('nan') for c in self._actual_target_cols]
+            y = torch.tensor(labels, dtype=torch.float).unsqueeze(0)  # Ensure y is [1, num_tasks]
             
             # Create mask for NaN values and replace NaNs with zeros
             y_mask = ~torch.isnan(y)
             y = torch.nan_to_num(y, nan=0.0)
             
-            data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, y_mask=y_mask)
+            data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, y_mask=y_mask, mol_id=mol_id)
             
             # Apply pre-transform if defined
             if self.pre_transform is not None:
                 data = self.pre_transform(data)
                 
             data_list.append(data)
+        
+        # Handle empty dataset case
+        if not data_list:
+            print("Warning: No molecules were successfully processed. Creating empty dataset.")
+            num_node_features = 5
+            dummy_data = Data(x=torch.empty((0, num_node_features), dtype=torch.float),
+                            edge_index=torch.empty((2, 0), dtype=torch.long),
+                            edge_attr=torch.empty((0, 1), dtype=torch.float),
+                            y=torch.empty((1, len(self._actual_target_cols)), dtype=torch.float),
+                            y_mask=torch.empty((1, len(self._actual_target_cols)), dtype=torch.bool),
+                            mol_id="dummy_molecule")
+            data_list.append(dummy_data)
         
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
@@ -201,6 +251,7 @@ def load_tox21(
     root: str = "data",
     filename: str = "tox21.csv",
     smiles_col: str = "smiles",
+    mol_id_col: str = "mol_id",  # New parameter
     target_cols: list[str] | None = None,
     cache_file: str = "data.pt",
     recreate: bool = False,
@@ -213,8 +264,9 @@ def load_tox21(
     ── root (str): path to the dataset directory (will contain raw/ and processed/ subdirectories).
     ── filename (str): name of the CSV file in the raw/ directory.
     ── smiles_col (str): name of the column with SMILES.
+    ── mol_id_col (str): name of the column with molecule IDs.
     ── target_cols (list[str]|None): list of target columns. 
-         If None — all columns except smiles_col.
+         If None — all columns except smiles_col and mol_id_col.
     ── cache_file (str): name of the cache file (torch.save) in the processed/ directory.
     ── recreate (bool): if True — ignore cache and recreate.
     ── auto_download (bool): if True — automatically download the dataset if it doesn't exist.
@@ -225,6 +277,7 @@ def load_tox21(
          • edge_index: LongTensor[2, num_edges]
          • edge_attr (optional): FloatTensor[num_edges, num_edge_features]
          • y: FloatTensor[num_tasks]
+         • mol_id: (str) molecule identifier
     """
     # Simply create and return a Tox21Dataset instance
     # The dataset will handle downloading and processing automatically
@@ -232,6 +285,7 @@ def load_tox21(
         root=root, 
         filename=filename,
         smiles_col=smiles_col,
+        mol_id_col=mol_id_col,  # Pass mol_id_col
         target_cols=target_cols, 
         cache_file=cache_file, 
         auto_download=auto_download, 
