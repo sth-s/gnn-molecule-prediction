@@ -65,9 +65,10 @@ class Tox21Dataset(InMemoryDataset):
     def __init__(self,
                  root: str,
                  filename: str = "tox21.csv",
+                 smiles_col: str = "smiles",
                  target_cols: list[str] | None = None,
                  cache_file: str = "processed_tox21.pt",
-                 download: bool = True,
+                 auto_download: bool = True,
                  recreate: bool = False,
                  transform=None,
                  pre_transform=None):
@@ -79,14 +80,17 @@ class Tox21Dataset(InMemoryDataset):
         ── filename (str): Name of the raw file to download
         ── smiles_col (str): Column name in CSV that contains SMILES strings
         ── target_cols (list[str]|None): Target columns to predict. If None, all columns except smiles_col.
+        ── cache_file (str): Name of the cache file for processed data
+        ── download (bool): If True, automatically download the dataset if it doesn't exist
+        ── recreate (bool): If True, dataset will be reprocessed even if processed files exist
         ── transform (callable, optional): Transform to be applied to each data instance
         ── pre_transform (callable, optional): Transform to be applied to dataset before saving
-        ── recreate (bool): If True, dataset will be reprocessed even if processed files exist
         """
         self.filename   = filename
+        self.smiles_col = smiles_col
         self._target_cols = target_cols
         self.cache_file = cache_file
-        self.download   = download
+        self.auto_download = auto_download  # Renamed to avoid conflict with download() method
         self.recreate   = recreate
         # if recreate=True, remove previously generated cache
         if self.recreate and os.path.exists(self.processed_paths[0]):
@@ -103,7 +107,7 @@ class Tox21Dataset(InMemoryDataset):
         return [self.cache_file]
 
     def download(self):
-        if not self.download:
+        if not self.auto_download:
             raise RuntimeError("download=False, raw file missing")
         download_tox21(self.root, self.filename)
     
@@ -200,7 +204,7 @@ def load_tox21(
     target_cols: list[str] | None = None,
     cache_file: str = "data.pt",
     recreate: bool = False,
-    download: bool = True,
+    auto_download: bool = True,
 ) -> Tox21Dataset:
     """
     Loads and caches Tox21 as a PyG InMemoryDataset.
@@ -213,7 +217,7 @@ def load_tox21(
          If None — all columns except smiles_col.
     ── cache_file (str): name of the cache file (torch.save) in the processed/ directory.
     ── recreate (bool): if True — ignore cache and recreate.
-    ── download (bool): if True — automatically download the dataset if it doesn't exist.
+    ── auto_download (bool): if True — automatically download the dataset if it doesn't exist.
 
     Returns:
     ── dataset (Tox21Dataset): contains Data objects with fields:
@@ -224,4 +228,12 @@ def load_tox21(
     """
     # Simply create and return a Tox21Dataset instance
     # The dataset will handle downloading and processing automatically
-    return Tox21Dataset(root, filename, target_cols, cache_file, download, recreate)
+    return Tox21Dataset(
+        root=root, 
+        filename=filename,
+        smiles_col=smiles_col,
+        target_cols=target_cols, 
+        cache_file=cache_file, 
+        auto_download=auto_download, 
+        recreate=recreate
+    )
