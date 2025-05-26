@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import numpy as np
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc
 
-def train_epoch(model, loader, optimizer, device):
+def train_epoch(model, loader, optimizer, device, scheduler=None):
     """
     Train the model for one epoch.
     
@@ -12,13 +12,16 @@ def train_epoch(model, loader, optimizer, device):
     -- loader: DataLoader containing training batches
     -- optimizer: the optimizer for parameter updates
     -- device: the device to use (CPU or GPU)
+    -- scheduler: optional learning rate scheduler (default: None)
     
     Returns:
     -- average loss for the epoch
+    -- list of learning rates used during each step (if scheduler is provided)
     """
     model.train()
     total_loss = 0.
     total_masks = 0
+    lr_history = []  # For tracking learning rate changes
     
     for batch in loader:
         batch = batch.to(device)
@@ -39,12 +42,25 @@ def train_epoch(model, loader, optimizer, device):
         loss.backward()
         optimizer.step()
         
+        # If scheduler is provided, step it after optimizer update and track LR
+        if scheduler is not None:
+            # Save current learning rate before stepping
+            current_lr = optimizer.param_groups[0]['lr']
+            lr_history.append(current_lr)
+            scheduler.step()
+        
         # Accumulate statistics
         total_loss += loss.item() * mask.sum().item()
         total_masks += mask.sum().item()
     
-    # Return average loss
-    return total_loss / total_masks
+    # Calculate average loss
+    avg_loss = total_loss / total_masks
+    
+    # Return average loss and lr history
+    if scheduler is not None:
+        return avg_loss, lr_history
+    else:
+        return avg_loss
 
 def evaluate(model, loader, device):
     """
