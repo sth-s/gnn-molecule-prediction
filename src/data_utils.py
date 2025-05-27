@@ -9,7 +9,7 @@ from tqdm import tqdm
 import requests
 import shutil
 import deepchem as dc
-from deepchem.feat.mol_graphs import GraphData
+from deepchem.feat.graph_data import GraphData
 
 # Setup for safe weights-only loading in PyTorch 2.6+
 try:
@@ -173,7 +173,7 @@ class Tox21Dataset(InMemoryDataset):
             self._actual_target_cols = self._target_cols
         
         # Initialize molecule featurizer from DeepChem
-        featurizer = dc.feat.MolGraphConvFeaturizer(use_edges=True)
+        featurizer = dc.feat.GraphConvFeaturizer(use_edges=True)
         
         # Process molecules
         data_list = []
@@ -226,18 +226,16 @@ class Tox21Dataset(InMemoryDataset):
         # Handle empty dataset case
         if not data_list:
             print("Warning: No molecules were successfully processed. Creating empty dataset.")
-            # Dynamically determine the number of node features from the featurizer
-            # GraphData uses node_fdim instead of feature_length
-            try:
-                # Attempt to get the dimension from featurizer.graph_featurizer
-                num_node_features = featurizer.graph_featurizer.atom_fdim
-            except AttributeError:
-                # If unsuccessful, use the default value for MolGraphConvFeaturizer
-                print("Could not determine node feature dimension, using default value")
-                num_node_features = 30  # Typical value for MolGraphConvFeaturizer without additional features
+            # Dynamically determine the number of node features from the first successfully processed graph
+            # or use a default value if no graphs were successfully processed
+            num_node_features = mol_graph.node_features.shape[1] if mol_graph else 75
+            
+            # The dimensionality of edge features is typically 1 but may vary depending on the featurizer
+            num_edge_features = mol_graph.edge_features.shape[1] if mol_graph and mol_graph.edge_features.shape[0] > 0 else 1
+            
             dummy_data = Data(x=torch.empty((0, num_node_features), dtype=torch.float),
                             edge_index=torch.empty((2, 0), dtype=torch.long),
-                            edge_attr=torch.empty((0, 1), dtype=torch.float),
+                            edge_attr=torch.empty((0, num_edge_features), dtype=torch.float),
                             y=torch.empty((1, len(self._actual_target_cols)), dtype=torch.float),
                             y_mask=torch.empty((1, len(self._actual_target_cols)), dtype=torch.bool),
                             mol_id="dummy_molecule")
