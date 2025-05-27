@@ -9,7 +9,7 @@ from tqdm import tqdm
 import requests
 import shutil
 import deepchem as dc
-from deepchem.feat.mol_graphs import ConvMol
+from deepchem.feat.mol_graphs import GraphData
 
 # Setup for safe weights-only loading in PyTorch 2.6+
 try:
@@ -191,30 +191,14 @@ class Tox21Dataset(InMemoryDataset):
                 
                 mol_graph = mol_graphs[0]
                 
-                # Extract node features from DeepChem's ConvMol
-                node_features = mol_graph.node_features
-                x = torch.tensor(node_features, dtype=torch.float)
+                # Extract node features directly from GraphData
+                x = torch.tensor(mol_graph.node_features, dtype=torch.float)
                 
-                # Extract edge information
-                edge_index = []
-                edge_attr = []
+                # Extract edge information directly from GraphData
+                edge_index = torch.tensor(mol_graph.edge_index.T, dtype=torch.long)
+                edge_attr = torch.tensor(mol_graph.edge_features, dtype=torch.float)
                 
-                # DeepChem ConvMol stores edges in a different format
-                # We need to convert it to PyG format
-                for atom_idx in range(len(mol_graph.nodes)):
-                    neighbors = mol_graph.get_adjacency_list()[atom_idx]
-                    for neighbor in neighbors:
-                        edge_index.append([atom_idx, neighbor])
-                        # Get bond type as a feature
-                        # In DeepChem, we can extract edge features
-                        bond_feature = mol_graph.edge_features[atom_idx, neighbor]
-                        # We'll take the first element as the bond type (similar to RDKit's GetBondTypeAsDouble)
-                        edge_attr.append([float(bond_feature[0])])
-                
-                if len(edge_index) > 0:  # Check that there is at least one edge
-                    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-                    edge_attr = torch.tensor(edge_attr, dtype=torch.float)
-                else:
+                if edge_index.shape[1] == 0:  # Check that there is at least one edge
                     # Create empty tensors of appropriate dimensions
                     edge_index = torch.zeros((2, 0), dtype=torch.long)
                     edge_attr = torch.zeros((0, 1), dtype=torch.float)
@@ -242,7 +226,15 @@ class Tox21Dataset(InMemoryDataset):
         # Handle empty dataset case
         if not data_list:
             print("Warning: No molecules were successfully processed. Creating empty dataset.")
-            num_node_features = featurizer.feature_length()  # Get feature length from DeepChem featurizer
+            # Dynamically determine the number of node features from the featurizer
+            # GraphData uses node_fdim instead of feature_length
+            try:
+                # Attempt to get the dimension from featurizer.graph_featurizer
+                num_node_features = featurizer.graph_featurizer.atom_fdim
+            except AttributeError:
+                # If unsuccessful, use the default value for MolGraphConvFeaturizer
+                print("Could not determine node feature dimension, using default value")
+                num_node_features = 30  # Typical value for MolGraphConvFeaturizer without additional features
             dummy_data = Data(x=torch.empty((0, num_node_features), dtype=torch.float),
                             edge_index=torch.empty((2, 0), dtype=torch.long),
                             edge_attr=torch.empty((0, 1), dtype=torch.float),
