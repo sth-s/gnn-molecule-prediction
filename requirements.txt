@@ -2,6 +2,7 @@
 torch>=2.0
 torch-geometric
 rdkit-pypi
+deepchem>=2.7.1
 scikit-learn
 matplotlib
 seaborn

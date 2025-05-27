@@ -5,10 +5,11 @@ import os
 import pandas as pd
 import torch
 from torch_geometric.data import InMemoryDataset, Data
-from rdkit import Chem
 from tqdm import tqdm
 import requests
 import shutil
+import deepchem as dc
+from deepchem.feat.mol_graphs import ConvMol
 
 # Setup for safe weights-only loading in PyTorch 2.6+
 try:
@@ -171,67 +172,77 @@ class Tox21Dataset(InMemoryDataset):
         else:
             self._actual_target_cols = self._target_cols
         
+        # Initialize molecule featurizer from DeepChem
+        featurizer = dc.feat.MolGraphConvFeaturizer(use_edges=True)
+        
         # Process molecules
         data_list = []
         for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing molecules"):
             smiles = row[self.smiles_col]
             mol_id = str(row[self.mol_id_col])  # Ensure mol_id is string
-            mol = Chem.MolFromSmiles(smiles)
             
-            if mol is None:
-                print(f"Failed SMILES: {smiles} (idx={idx}, mol_id={mol_id})")
-                continue
-            
-            # Node features
-            atom_feats = []
-            for atom in mol.GetAtoms():
-                atom_feats.append([
-                    atom.GetAtomicNum(),
-                    atom.GetDegree(),
-                    atom.GetFormalCharge(),
-                    atom.GetTotalNumHs(),
-                    int(atom.GetIsAromatic()),
-                ])
-            x = torch.tensor(atom_feats, dtype=torch.float)
-            
-            # Edges + edge features
-            edge_index = []
-            edge_attr = []
-            for bond in mol.GetBonds():
-                i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-                edge_index += [[i, j], [j, i]]
-                # example of bond feature: type (1-single, 2-double...)
-                bond_type = bond.GetBondTypeAsDouble()
-                edge_attr += [[bond_type], [bond_type]]
-            
-            if len(edge_index) > 0:  # Check that there is at least one edge
-                edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-                edge_attr = torch.tensor(edge_attr, dtype=torch.float)
-            else:
-                # Create empty tensors of appropriate dimensions
-                edge_index = torch.zeros((2, 0), dtype=torch.long)
-                edge_attr = torch.zeros((0, 1), dtype=torch.float)
-            
-            # Labels
-            labels = [float(row[c]) if pd.notna(row[c]) else float('nan') for c in self._actual_target_cols]
-            y = torch.tensor(labels, dtype=torch.float).unsqueeze(0)  # Ensure y is [1, num_tasks]
-            
-            # Create mask for NaN values and replace NaNs with zeros
-            y_mask = ~torch.isnan(y)
-            y = torch.nan_to_num(y, nan=0.0)
-            
-            data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, y_mask=y_mask, mol_id=mol_id)
-            
-            # Apply pre-transform if defined
-            if self.pre_transform is not None:
-                data = self.pre_transform(data)
+            # Use DeepChem to featurize the molecule
+            try:
+                # Featurize the molecule using DeepChem
+                mol_graphs = featurizer.featurize([smiles])
+                if not mol_graphs or mol_graphs[0] is None:
+                    print(f"Failed SMILES: {smiles} (idx={idx}, mol_id={mol_id})")
+                    continue
                 
-            data_list.append(data)
+                mol_graph = mol_graphs[0]
+                
+                # Extract node features from DeepChem's ConvMol
+                node_features = mol_graph.node_features
+                x = torch.tensor(node_features, dtype=torch.float)
+                
+                # Extract edge information
+                edge_index = []
+                edge_attr = []
+                
+                # DeepChem ConvMol stores edges in a different format
+                # We need to convert it to PyG format
+                for atom_idx in range(len(mol_graph.nodes)):
+                    neighbors = mol_graph.get_adjacency_list()[atom_idx]
+                    for neighbor in neighbors:
+                        edge_index.append([atom_idx, neighbor])
+                        # Get bond type as a feature
+                        # In DeepChem, we can extract edge features
+                        bond_feature = mol_graph.edge_features[atom_idx, neighbor]
+                        # We'll take the first element as the bond type (similar to RDKit's GetBondTypeAsDouble)
+                        edge_attr.append([float(bond_feature[0])])
+                
+                if len(edge_index) > 0:  # Check that there is at least one edge
+                    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+                    edge_attr = torch.tensor(edge_attr, dtype=torch.float)
+                else:
+                    # Create empty tensors of appropriate dimensions
+                    edge_index = torch.zeros((2, 0), dtype=torch.long)
+                    edge_attr = torch.zeros((0, 1), dtype=torch.float)
+                
+                # Labels
+                labels = [float(row[c]) if pd.notna(row[c]) else float('nan') for c in self._actual_target_cols]
+                y = torch.tensor(labels, dtype=torch.float).unsqueeze(0)  # Ensure y is [1, num_tasks]
+                
+                # Create mask for NaN values and replace NaNs with zeros
+                y_mask = ~torch.isnan(y)
+                y = torch.nan_to_num(y, nan=0.0)
+                
+                data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, y_mask=y_mask, mol_id=mol_id)
+                
+                # Apply pre-transform if defined
+                if self.pre_transform is not None:
+                    data = self.pre_transform(data)
+                    
+                data_list.append(data)
+                
+            except Exception as e:
+                print(f"Error processing SMILES {smiles} (idx={idx}, mol_id={mol_id}): {e}")
+                continue
         
         # Handle empty dataset case
         if not data_list:
             print("Warning: No molecules were successfully processed. Creating empty dataset.")
-            num_node_features = 5
+            num_node_features = featurizer.feature_length()  # Get feature length from DeepChem featurizer
             dummy_data = Data(x=torch.empty((0, num_node_features), dtype=torch.float),
                             edge_index=torch.empty((2, 0), dtype=torch.long),
                             edge_attr=torch.empty((0, 1), dtype=torch.float),

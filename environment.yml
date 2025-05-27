@@ -7,7 +7,6 @@ dependencies:
   - pytorch
   - torchvision
   - torchaudio
-  - rdkit
   - scikit-learn
   - matplotlib
   - seaborn
@@ -16,3 +15,4 @@ dependencies:
   - pip:
     - torch-geometric
     - requests
+    - deepchem>=2.7.1
