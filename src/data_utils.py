@@ -9,7 +9,6 @@ from tqdm import tqdm
 import requests
 import shutil
 import deepchem as dc
-from deepchem.feat.graph_data import GraphData
 
 # Setup for safe weights-only loading in PyTorch 2.6+
 try:
@@ -93,7 +92,8 @@ class Tox21Dataset(InMemoryDataset):
                  auto_download: bool = True,
                  recreate: bool = False,
                  transform=None,
-                 pre_transform=None):
+                 pre_transform=None,
+                 device: torch.device = torch.device("cpu")):
         """
         Tox21 dataset for molecular toxicity prediction.
         
@@ -116,6 +116,7 @@ class Tox21Dataset(InMemoryDataset):
         self.cache_file = cache_file
         self.auto_download = auto_download
         self.recreate   = recreate
+        self.device = device
         
         _processed_dir = os.path.join(root, 'processed')
         _processed_file_path = os.path.join(_processed_dir, self.cache_file)
@@ -173,7 +174,7 @@ class Tox21Dataset(InMemoryDataset):
             self._actual_target_cols = self._target_cols
         
         # Initialize molecule featurizer from DeepChem
-        featurizer = dc.feat.GraphConvFeaturizer(use_edges=True)
+        featurizer = dc.feat.MolGraphConvFeaturizer(use_edges=True)
         
         # Process molecules
         data_list = []
@@ -184,19 +185,21 @@ class Tox21Dataset(InMemoryDataset):
             # Use DeepChem to featurize the molecule
             try:
                 # Featurize the molecule using DeepChem
-                mol_graphs = featurizer.featurize([smiles])
-                if not mol_graphs or mol_graphs[0] is None:
+                out_featurize = featurizer.featurize([smiles])
+                if not out_featurize or out_featurize[0] is None:
                     print(f"Failed SMILES: {smiles} (idx={idx}, mol_id={mol_id})")
                     continue
                 
-                mol_graph = mol_graphs[0]
+                mol_graphs = out_featurize[0]
+                # pyg_graphs = mol_graphs.to_pyg_graphs()
                 
                 # Extract node features directly from GraphData
-                x = torch.tensor(mol_graph.node_features, dtype=torch.float)
+                x = torch.tensor(mol_graphs.node_features, dtype=torch.float)
+                print(f"Node features shape: {x.shape[0]} nodes, {x.shape[1]} features")
                 
                 # Extract edge information directly from GraphData
-                edge_index = torch.tensor(mol_graph.edge_index.T, dtype=torch.long)
-                edge_attr = torch.tensor(mol_graph.edge_features, dtype=torch.float)
+                edge_index = torch.tensor(mol_graphs.edge_index.T, dtype=torch.long)
+                edge_attr = torch.tensor(mol_graphs.edge_features, dtype=torch.float)
                 
                 if edge_index.shape[1] == 0:  # Check that there is at least one edge
                     # Create empty tensors of appropriate dimensions
@@ -225,21 +228,7 @@ class Tox21Dataset(InMemoryDataset):
         
         # Handle empty dataset case
         if not data_list:
-            print("Warning: No molecules were successfully processed. Creating empty dataset.")
-            # Dynamically determine the number of node features from the first successfully processed graph
-            # or use a default value if no graphs were successfully processed
-            num_node_features = mol_graph.node_features.shape[1] if mol_graph else 75
-            
-            # The dimensionality of edge features is typically 1 but may vary depending on the featurizer
-            num_edge_features = mol_graph.edge_features.shape[1] if mol_graph and mol_graph.edge_features.shape[0] > 0 else 1
-            
-            dummy_data = Data(x=torch.empty((0, num_node_features), dtype=torch.float),
-                            edge_index=torch.empty((2, 0), dtype=torch.long),
-                            edge_attr=torch.empty((0, num_edge_features), dtype=torch.float),
-                            y=torch.empty((1, len(self._actual_target_cols)), dtype=torch.float),
-                            y_mask=torch.empty((1, len(self._actual_target_cols)), dtype=torch.bool),
-                            mol_id="dummy_molecule")
-            data_list.append(dummy_data)
+            print("Warning: No molecules were successfully processed.")
         
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
@@ -257,6 +246,7 @@ def load_tox21(
     cache_file: str = "data.pt",
     recreate: bool = False,
     auto_download: bool = True,
+    device: torch.device = torch.device("cpu")
 ) -> Tox21Dataset:
     """
     Loads and caches Tox21 as a PyG InMemoryDataset.
@@ -290,5 +280,6 @@ def load_tox21(
         target_cols=target_cols, 
         cache_file=cache_file, 
         auto_download=auto_download, 
-        recreate=recreate
+        recreate=recreate,
+        device= device
     )
