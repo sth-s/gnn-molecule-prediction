@@ -175,6 +175,8 @@ class Tox21Dataset(InMemoryDataset):
         
         # Initialize molecule featurizer from DeepChem
         featurizer = dc.feat.MolGraphConvFeaturizer(use_edges=True)
+
+        expected_edge_dim = None
         
         # Process molecules
         data_list = []
@@ -200,11 +202,20 @@ class Tox21Dataset(InMemoryDataset):
                 # Extract edge information directly from GraphData
                 edge_index = torch.tensor(mol_graphs.edge_index.T, dtype=torch.long)
                 edge_attr = torch.tensor(mol_graphs.edge_features, dtype=torch.float)
+
+                if expected_edge_dim is None:
+                    expected_edge_dim = edge_attr.shape[1]
+
                 
                 if edge_index.shape[1] == 0:  # Check that there is at least one edge
                     # Create empty tensors of appropriate dimensions
                     edge_index = torch.zeros((2, 0), dtype=torch.long)
                     edge_attr = torch.zeros((0, 1), dtype=torch.float)
+                
+                print(f"Edge index shape: {edge_index.shape[1]}, Edge attributes shape: {edge_attr.shape[1]}")
+                if edge_attr.shape[1] != expected_edge_dim:
+                    print(f"Warning: Edge attributes dimension mismatch for SMILES {smiles} (idx={idx}, mol_id={mol_id}). Expected {expected_edge_dim}, got {edge_attr.shape[1]}.")
+                    continue
                 
                 # Labels
                 labels = [float(row[c]) if pd.notna(row[c]) else float('nan') for c in self._actual_target_cols]
