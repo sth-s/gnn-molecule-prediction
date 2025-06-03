@@ -4,7 +4,7 @@ Utility functions for loading and preprocessing the Tox21 dataset.
 import os
 import pandas as pd
 import torch
-from torch_geometric.data import InMemoryDataset, Data
+from torch_geometric.data import Dataset, Data
 from tqdm import tqdm
 import requests
 import shutil
@@ -13,22 +13,80 @@ import deepchem as dc
 # Setup for safe weights-only loading in PyTorch 2.6+
 try:
     from torch import serialization
+    import numpy as np
+    
     # Import PyG classes for serialization
-    from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
+    from torch_geometric.data.data import Data, DataEdgeAttr, DataTensorAttr
     from torch_geometric.data.storage import GlobalStorage
     
     try:
         from torch_geometric.data.storage import NodeStorage, EdgeStorage, GraphStorage
-        pyg_storage_classes = [GlobalStorage, NodeStorage, EdgeStorage, GraphStorage]
+        pyg_storage_classes = [Data, GlobalStorage, NodeStorage, EdgeStorage, GraphStorage]
     except ImportError:
-        pyg_storage_classes = [GlobalStorage]
+        pyg_storage_classes = [Data, GlobalStorage]
+    
+    # Add numpy classes for safe loading
+    numpy_classes = []
+    try:
+        import numpy._core.multiarray
+        numpy_classes.append(numpy._core.multiarray._reconstruct)
+    except (ImportError, AttributeError):
+        pass
+    
+    try:
+        import numpy.core.multiarray
+        numpy_classes.append(numpy.core.multiarray._reconstruct)
+    except (ImportError, AttributeError):
+        pass
+    
+    try:
+        numpy_classes.extend([
+            np.ndarray,
+            np.dtype,
+            np.float64,
+            np.float32,
+            np.int64,
+            np.int32,
+            np.bool_,
+            np.uint8,
+            np.uint32,
+            np.uint64,
+        ])
+        
+        # Add numpy dtype classes that might be encountered
+        try:
+            import numpy.dtypes
+            numpy_classes.extend([
+                numpy.dtypes.Float64DType,
+                numpy.dtypes.Float32DType,
+                numpy.dtypes.Int64DType,
+                numpy.dtypes.Int32DType,
+                numpy.dtypes.BoolDType,
+                numpy.dtypes.UInt8DType,
+                numpy.dtypes.UInt32DType,
+                numpy.dtypes.UInt64DType,
+            ])
+        except (ImportError, AttributeError):
+            pass
+            
+    except AttributeError:
+        pass
+    
+    # Also try to add multiarray.scalar if available
+    try:
+        numpy_classes.append(numpy._core.multiarray.scalar)
+    except (ImportError, AttributeError):
+        try:
+            numpy_classes.append(numpy.core.multiarray.scalar)
+        except (ImportError, AttributeError):
+            pass
     
     # Register classes for safe loading
-    safe_classes = [DataEdgeAttr, DataTensorAttr] + pyg_storage_classes
+    safe_classes = [DataEdgeAttr, DataTensorAttr] + pyg_storage_classes + numpy_classes
     serialization.add_safe_globals(safe_classes)
-    print(f"Registered PyG classes for safe weights_only loading")
-except (ImportError, AttributeError) as e:
-    print(f"Note: Using default PyTorch loading behavior")
+    print(f"Registered {len(safe_classes)} classes for safe weights_only loading")
+except (ImportError, AttributeError):
+    print("Note: Using default PyTorch loading behavior")
 
 
 def download_tox21(root: str, filename: str) -> str:
@@ -80,8 +138,8 @@ def download_tox21(root: str, filename: str) -> str:
     return full_path
 
 
-# Creating InMemoryDataset
-class Tox21Dataset(InMemoryDataset):
+# Creating Dataset
+class Tox21Dataset(Dataset):
     def __init__(self,
                  root: str,
                  filename: str = "tox21.csv",
@@ -122,17 +180,18 @@ class Tox21Dataset(InMemoryDataset):
         _processed_file_path = os.path.join(_processed_dir, self.cache_file)
 
         if self.recreate and os.path.exists(_processed_file_path):
-            print(f"Recreating dataset: removing existing cache file")
+            print("Recreating dataset: removing existing cache file")
             os.makedirs(_processed_dir, exist_ok=True) 
             os.remove(_processed_file_path)
         
         # Call the parent constructor which handles dataset setup
         super().__init__(root, transform, pre_transform)
         
-        # Explicitly load the processed data if file exists
-        # This ensures compatibility with PyTorch 2.6+ where weights_only=True by default
+        # Load the processed data if file exists, otherwise process
         if os.path.exists(self.processed_paths[0]):
-            self.load(self.processed_paths[0])
+            self.data_list = torch.load(self.processed_paths[0])
+        else:
+            self.process()
 
     @property
     def raw_file_names(self):
@@ -158,6 +217,12 @@ class Tox21Dataset(InMemoryDataset):
     def num_classes(self):
         return len(self.target_cols)
     
+    def len(self):
+        return len(self.data_list)
+
+    def get(self, idx):
+        return self.data_list[idx]
+        
     def process(self):
         # Read CSV file
         csv_path = os.path.join(self.raw_dir, self.filename)
@@ -200,8 +265,8 @@ class Tox21Dataset(InMemoryDataset):
                 print(f"Node features shape: {x.shape[0]} nodes, {x.shape[1]} features")
                 
                 # Extract edge information directly from GraphData
-                edge_index = torch.tensor(mol_graphs.edge_index.T, dtype=torch.long)
-                edge_attr = torch.tensor(mol_graphs.edge_features, dtype=torch.float)
+                edge_index = mol_graphs.edge_index.T
+                edge_attr = mol_graphs.edge_features
 
                 if expected_edge_dim is None:
                     expected_edge_dim = edge_attr.shape[1]
@@ -241,8 +306,9 @@ class Tox21Dataset(InMemoryDataset):
         if not data_list:
             print("Warning: No molecules were successfully processed.")
         
-        data, slices = self.collate(data_list)
-        torch.save((data, slices), self.processed_paths[0])
+        # Save data_list directly without collate
+        torch.save(data_list, self.processed_paths[0])
+        self.data_list = data_list
         
         print(f"Dataset processed and saved to: {self.processed_paths[0]}")
         print(f"Total graphs: {len(data_list)}")
@@ -260,7 +326,7 @@ def load_tox21(
     device: torch.device = torch.device("cpu")
 ) -> Tox21Dataset:
     """
-    Loads and caches Tox21 as a PyG InMemoryDataset.
+    Loads and caches Tox21 as a PyG Dataset.
 
     Parameters:
     ── root (str): path to the dataset directory (will contain raw/ and processed/ subdirectories).
