@@ -265,8 +265,9 @@ class Tox21Dataset(Dataset):
                 print(f"Node features shape: {x.shape[0]} nodes, {x.shape[1]} features")
                 
                 # Extract edge information directly from GraphData
-                edge_index = mol_graphs.edge_index
-                edge_attr = mol_graphs.edge_features
+                edge_index = torch.tensor(mol_graphs.edge_index, dtype=torch.long)
+                edge_attr = torch.tensor(mol_graphs.edge_features, dtype=torch.float32)
+
 
                 if edge_index.shape[0] != 2:
                     # Transpose only if necessary
