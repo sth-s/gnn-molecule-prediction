@@ -4,7 +4,11 @@ Utility functions for loading and preprocessing the Tox21 dataset.
 import os
 import pandas as pd
 import torch
+import random
+from collections import defaultdict
+from typing import Tuple
 from torch_geometric.data import Dataset, Data
+from torch.utils.data import Subset
 from tqdm import tqdm
 import requests
 import shutil
@@ -296,7 +300,7 @@ class Tox21Dataset(Dataset):
                 y_mask = ~torch.isnan(y)
                 y = torch.nan_to_num(y, nan=0.0)
                 
-                data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, y_mask=y_mask, mol_id=mol_id)
+                data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, y_mask=y_mask, mol_id=mol_id, smiles=smiles)
                 
                 # Apply pre-transform if defined
                 if self.pre_transform is not None:
@@ -352,6 +356,7 @@ def load_tox21(
          • edge_attr (optional): FloatTensor[num_edges, num_edge_features]
          • y: FloatTensor[num_tasks]
          • mol_id: (str) molecule identifier
+         • smiles: (str) original SMILES string
     """
     # Simply create and return a Tox21Dataset instance
     # The dataset will handle downloading and processing automatically
@@ -366,3 +371,198 @@ def load_tox21(
         recreate=recreate,
         device= device
     )
+
+
+# Additional splitting utilities
+
+
+def generate_scaffold(smiles: str) -> str:
+    """
+    Generate Murcko scaffold for a molecule from SMILES.
+    
+    Used by scaffold_split() to group molecules by their molecular scaffolds
+    for proper train/val/test splitting that avoids data leakage.
+    
+    Args:
+        smiles: SMILES string of molecule
+        
+    Returns:
+        scaffold: Murcko scaffold SMILES (empty string if generation fails)
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Chem.Scaffolds import MurckoScaffold
+        
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return ""
+        scaffold = MurckoScaffold.GetScaffoldForMol(mol)
+        return Chem.MolToSmiles(scaffold)
+    except Exception:
+        return ""
+
+def scaffold_split(dataset, train_ratio: float = 0.7, val_ratio: float = 0.15, 
+                  test_ratio: float = 0.15, seed: int = 42) -> Tuple[Subset, Subset, Subset]:
+    """
+    Split dataset based on molecular scaffolds to avoid data leakage.
+    
+    Args:
+        dataset: PyG dataset with Data objects containing mol_id
+        train_ratio: fraction for training set
+        val_ratio: fraction for validation set  
+        test_ratio: fraction for test set
+        seed: random seed for reproducibility
+        
+    Returns:
+        tuple of train, val, test Subset objects
+    """
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Ratios must sum to 1.0"
+    
+    # Extract SMILES from mol_id or reconstruct from molecular graphs
+    # For now, we'll use a simple approach based on molecule indices
+    # In a real implementation, you'd want to extract SMILES properly
+    
+    # Group molecules by scaffold
+    scaffold_to_indices = defaultdict(list)
+    
+    print("Generating scaffolds for molecules...")
+    for idx in range(len(dataset)):
+        data = dataset[idx]
+        
+        # Use real scaffold if SMILES is available, otherwise fall back to hash-based grouping
+        if hasattr(data, 'smiles'):
+            scaffold = generate_scaffold(data.smiles)
+            if scaffold:  # If scaffold generation succeeded
+                scaffold_key = scaffold
+            else:  # Fall back to hash if scaffold generation failed
+                scaffold_key = f"hash_{hash(data.mol_id) % 1000}"
+        else:
+            # Fall back to hash-based grouping if SMILES not available
+            scaffold_key = f"hash_{hash(data.mol_id) % 1000}"
+            
+        scaffold_to_indices[scaffold_key].append(idx)
+    
+    # Sort scaffolds by size (largest first) for better distribution
+    scaffolds = list(scaffold_to_indices.keys())
+    scaffolds.sort(key=lambda x: len(scaffold_to_indices[x]), reverse=True)
+    
+    # Assign scaffolds to splits
+    random.seed(seed)
+    random.shuffle(scaffolds)
+    
+    total_size = len(dataset)
+    train_size = int(train_ratio * total_size)
+    val_size = int(val_ratio * total_size)
+    
+    train_indices, val_indices, test_indices = [], [], []
+    train_count, val_count = 0, 0
+    
+    for scaffold in scaffolds:
+        indices = scaffold_to_indices[scaffold]
+        
+        if train_count + len(indices) <= train_size:
+            train_indices.extend(indices)
+            train_count += len(indices)
+        elif val_count + len(indices) <= val_size:
+            val_indices.extend(indices)
+            val_count += len(indices)
+        else:
+            test_indices.extend(indices)
+    
+    print(f"Scaffold split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
+    
+    return (Subset(dataset, train_indices), 
+            Subset(dataset, val_indices), 
+            Subset(dataset, test_indices))
+
+def random_split(dataset, train_ratio: float = 0.7, val_ratio: float = 0.15, 
+                test_ratio: float = 0.15, seed: int = 42) -> Tuple[Subset, Subset, Subset]:
+    """
+    Random split of dataset into train/val/test.
+    
+    Args:
+        dataset: PyG dataset
+        train_ratio: fraction for training set
+        val_ratio: fraction for validation set
+        test_ratio: fraction for test set
+        seed: random seed for reproducibility
+        
+    Returns:
+        tuple of train, val, test Subset objects
+    """
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Ratios must sum to 1.0"
+    
+    total_size = len(dataset)
+    indices = list(range(total_size))
+    
+    random.seed(seed)
+    random.shuffle(indices)
+    
+    train_size = int(train_ratio * total_size)
+    val_size = int(val_ratio * total_size)
+    
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:train_size + val_size]
+    test_indices = indices[train_size + val_size:]
+    
+    print(f"Random split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
+    
+    return (Subset(dataset, train_indices), 
+            Subset(dataset, val_indices), 
+            Subset(dataset, test_indices))
+
+def index_split(dataset, train_ratio: float = 0.7, val_ratio: float = 0.15, 
+               test_ratio: float = 0.15) -> Tuple[Subset, Subset, Subset]:
+    """
+    Sequential index-based split (no shuffling).
+    
+    Args:
+        dataset: PyG dataset
+        train_ratio: fraction for training set
+        val_ratio: fraction for validation set
+        test_ratio: fraction for test set
+        
+    Returns:
+        tuple of train, val, test Subset objects
+    """
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Ratios must sum to 1.0"
+    
+    total_size = len(dataset)
+    train_size = int(train_ratio * total_size)
+    val_size = int(val_ratio * total_size)
+    
+    train_indices = list(range(train_size))
+    val_indices = list(range(train_size, train_size + val_size))
+    test_indices = list(range(train_size + val_size, total_size))
+    
+    print(f"Index split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
+    
+    return (Subset(dataset, train_indices), 
+            Subset(dataset, val_indices), 
+            Subset(dataset, test_indices))
+
+def split_dataset(dataset, split_type: str = "random", train_ratio: float = 0.7, 
+                 val_ratio: float = 0.15, test_ratio: float = 0.15, 
+                 seed: int = 42) -> Tuple[Subset, Subset, Subset]:
+    """
+    Split dataset using specified method.
+    
+    Args:
+        dataset: PyG dataset
+        split_type: "random", "scaffold", or "index"
+        train_ratio: fraction for training set
+        val_ratio: fraction for validation set
+        test_ratio: fraction for test set
+        seed: random seed for reproducibility
+        
+    Returns:
+        tuple of train, val, test Subset objects
+    """
+    if split_type == "random":
+        return random_split(dataset, train_ratio, val_ratio, test_ratio, seed)
+    elif split_type == "scaffold":
+        return scaffold_split(dataset, train_ratio, val_ratio, test_ratio, seed)
+    elif split_type == "index":
+        return index_split(dataset, train_ratio, val_ratio, test_ratio)
+    else:
+        raise ValueError(f"Unknown split_type: {split_type}. Use 'random', 'scaffold', or 'index'")

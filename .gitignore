@@ -26,3 +26,9 @@ conda-meta/
 
 # Data
 data/
+models/
+
+# Archive (old/deprecated files)
+archive/
+grid_search_results/
+test_grid_search/

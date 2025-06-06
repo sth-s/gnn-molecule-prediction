@@ -2,6 +2,122 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc
+import os
+from datetime import datetime
+
+# Model checkpoint utilities
+def save_checkpoint(model, optimizer, scheduler, epoch, metrics, save_path, is_best=False):
+    """
+    Save model checkpoint with training state.
+    
+    Args:
+        model: PyTorch model to save
+        optimizer: Optimizer state
+        scheduler: Scheduler state (can be None)
+        epoch: Current epoch number
+        metrics: Dictionary with current metrics
+        save_path: Path to save checkpoint
+        is_best: Whether this is the best model so far
+    """
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+        'metrics': metrics,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    torch.save(checkpoint, save_path)
+    
+    if is_best:
+        best_path = save_path.replace('.pt', '_best.pt')
+        torch.save(checkpoint, best_path)
+        print(f"Saved best model to {best_path}")
+    
+    print(f"Checkpoint saved to {save_path}")
+
+def load_checkpoint(model, optimizer, scheduler, checkpoint_path, device):
+    """
+    Load model checkpoint and restore training state.
+    
+    Args:
+        model: PyTorch model to load state into
+        optimizer: Optimizer to load state into
+        scheduler: Scheduler to load state into (can be None)
+        checkpoint_path: Path to checkpoint file
+        device: Device to load model on
+        
+    Returns:
+        epoch: Epoch number from checkpoint
+        metrics: Metrics from checkpoint
+    """
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    if scheduler and checkpoint['scheduler_state_dict']:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    
+    epoch = checkpoint['epoch']
+    metrics = checkpoint['metrics']
+    
+    print(f"Loaded checkpoint from epoch {epoch}")
+    return epoch, metrics
+
+def save_model_only(model, save_path, metadata=None):
+    """
+    Save only model state dict with optional metadata.
+    
+    Args:
+        model: PyTorch model to save
+        save_path: Path to save model
+        metadata: Optional dictionary with model metadata
+    """
+    save_dict = {
+        'model_state_dict': model.state_dict(),
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    if metadata:
+        save_dict.update(metadata)
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    torch.save(save_dict, save_path)
+    print(f"Model saved to {save_path}")
+
+def load_model_only(model, model_path, device):
+    """
+    Load only model state dict.
+    
+    Args:
+        model: PyTorch model to load state into
+        model_path: Path to model file
+        device: Device to load model on
+        
+    Returns:
+        metadata: Any additional metadata stored with model
+    """
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model not found: {model_path}")
+    
+    save_dict = torch.load(model_path, map_location=device)
+    model.load_state_dict(save_dict['model_state_dict'])
+    
+    # Return metadata (everything except model state)
+    metadata = {k: v for k, v in save_dict.items() if k != 'model_state_dict'}
+    
+    print(f"Model loaded from {model_path}")
+    return metadata
 
 def train_epoch(model, loader, optimizer, device, scheduler=None):
     """
